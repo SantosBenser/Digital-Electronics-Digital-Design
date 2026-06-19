@@ -1,1 +1,229 @@
+`timescale 1ns/1ps
 
+module dispenser(
+    input  wire clk,
+    input  wire rst_n,        // active low reset
+    input  wire start,        // start dispensing pulse
+    input  wire [1:0] select, // select beverage: 0=coffee,1=latte,2=espresso
+    input  wire [1:0] payment,// payment entered: must match coffee type code
+
+    output reg milk_on,
+    output reg coffee_on,
+    output reg froth_on,
+    output reg busy,
+    output reg done,
+    output reg invalid_pay
+);
+
+    // Parameters
+    parameter TOTAL_TIME_CYCLES = 100; // shorten for simulation
+
+    // Simple ratio memory
+    reg [7:0] milk_ratio   [0:2];
+    reg [7:0] coffee_ratio [0:2];
+    reg [7:0] froth_ratio  [0:2];
+
+    initial begin
+        milk_ratio[0]   = 8'd30; coffee_ratio[0] = 8'd60; froth_ratio[0] = 8'd10; // Coffee
+        milk_ratio[1]   = 8'd60; coffee_ratio[1] = 8'd30; froth_ratio[1] = 8'd10; // Latte
+        milk_ratio[2]   = 8'd5;  coffee_ratio[2] = 8'd90; froth_ratio[2] = 8'd5;  // Espresso
+    end
+
+    // FSM states
+    localparam IDLE        = 3'd0,
+               WAIT_PAY    = 3'd1,
+               CALC        = 3'd2,
+               DISP_MILK   = 3'd3,
+               DISP_COFFEE = 3'd4,
+               DISP_FROTH  = 3'd5,
+               FINISH      = 3'd6;
+
+    reg [2:0] state, next_state;
+
+    reg [31:0] dur_milk, dur_coffee, dur_froth;
+    reg [31:0] counter;
+
+    reg [7:0] sel_milk_r, sel_coffee_r, sel_froth_r;
+
+    reg start_d;
+    wire start_rise = start & ~start_d;
+
+    always @(posedge clk or negedge rst_n) begin
+        if (!rst_n)
+            start_d <= 1'b0;
+        else
+            start_d <= start;
+    end
+
+    // Sequential
+    always @(posedge clk or negedge rst_n) begin
+        if (!rst_n)
+            state <= IDLE;
+        else
+            state <= next_state;
+    end
+
+    // Combinational FSM
+    always @(*) begin
+        next_state = state;
+
+        case (state)
+
+            IDLE: begin
+                if (start_rise)
+                    next_state = WAIT_PAY;
+            end
+
+            WAIT_PAY: begin
+                // If payment matches selection, continue
+                if (payment == select)
+                    next_state = CALC;
+                else
+                    next_state = WAIT_PAY;
+            end
+
+            CALC:
+                next_state = DISP_MILK;
+
+            DISP_MILK:
+                if (counter == 0)
+                    next_state = DISP_COFFEE;
+
+            DISP_COFFEE:
+                if (counter == 0)
+                    next_state = DISP_FROTH;
+
+            DISP_FROTH:
+                if (counter == 0)
+                    next_state = FINISH;
+
+            FINISH:
+                next_state = IDLE;
+
+            default:
+                next_state = IDLE;
+
+        endcase
+    end
+
+    // Behavior
+    always @(posedge clk or negedge rst_n) begin
+
+        if (!rst_n) begin
+
+            milk_on      <= 0;
+            coffee_on    <= 0;
+            froth_on     <= 0;
+            busy         <= 0;
+            done         <= 0;
+            invalid_pay  <= 0;
+
+            counter      <= 0;
+            dur_milk     <= 0;
+            dur_coffee   <= 0;
+            dur_froth    <= 0;
+
+            sel_milk_r   <= 0;
+            sel_coffee_r <= 0;
+            sel_froth_r  <= 0;
+
+        end
+        else begin
+
+            done        <= 0;
+            invalid_pay <= 0;
+
+            case (state)
+
+                IDLE: begin
+
+                    milk_on   <= 0;
+                    coffee_on <= 0;
+                    froth_on  <= 0;
+
+                    busy      <= 0;
+                    counter   <= 0;
+
+                    if (start_rise) begin
+                        sel_milk_r   <= milk_ratio[select];
+                        sel_coffee_r <= coffee_ratio[select];
+                        sel_froth_r  <= froth_ratio[select];
+                    end
+                end
+
+                WAIT_PAY: begin
+
+                    // Show invalid pay if payment incorrect
+                    if (payment != select)
+                        invalid_pay <= 1'b1;
+                    else
+                        invalid_pay <= 1'b0;
+
+                end
+
+                CALC: begin
+
+                    busy       <= 1'b1;
+
+                    dur_milk   <= (TOTAL_TIME_CYCLES * sel_milk_r)   / 100;
+                    dur_coffee <= (TOTAL_TIME_CYCLES * sel_coffee_r) / 100;
+                    dur_froth  <= (TOTAL_TIME_CYCLES * sel_froth_r)  / 100;
+
+                    counter    <= (TOTAL_TIME_CYCLES * sel_milk_r) / 100;
+
+                end
+
+                DISP_MILK: begin
+
+                    if (counter > 0) begin
+                        milk_on <= 1;
+                        counter <= counter - 1;
+                    end
+                    else begin
+                        milk_on <= 0;
+                        counter <= dur_coffee;
+                    end
+
+                end
+
+                DISP_COFFEE: begin
+
+                    if (counter > 0) begin
+                        coffee_on <= 1;
+                        counter   <= counter - 1;
+                    end
+                    else begin
+                        coffee_on <= 0;
+                        counter   <= dur_froth;
+                    end
+
+                end
+
+                DISP_FROTH: begin
+
+                    if (counter > 0) begin
+                        froth_on <= 1;
+                        counter  <= counter - 1;
+                    end
+                    else begin
+                        froth_on <= 0;
+                    end
+
+                end
+
+                FINISH: begin
+
+                    milk_on   <= 0;
+                    coffee_on <= 0;
+                    froth_on  <= 0;
+
+                    busy      <= 0;
+                    done      <= 1;
+
+                end
+
+            endcase
+        end
+    end
+
+endmodule
